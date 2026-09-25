@@ -173,10 +173,10 @@ jobs:
           # Build all packages in one dependency graph so shared prerequisites
           # are scheduled once and can run in parallel.
           make -j4 \
+          LINUX_VERMAGIC=9469a6c8c449c47e503c05678ea1559d \
           package/kmod-amneziawg/compile \
           package/amneziawg-tools/compile \
           package/luci-proto-amneziawg/compile \
-          LINUX_VERMAGIC:=9469a6c8c449c47e503c05678ea1559d \
           V=s
   
           
