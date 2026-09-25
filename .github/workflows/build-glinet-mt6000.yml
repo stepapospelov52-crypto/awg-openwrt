@@ -21,7 +21,7 @@ jobs:
           path: owrt
           fetch-depth: 0
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -30,45 +30,85 @@ jobs:
             libssl-dev python3-setuptools rsync swig \
             unzip zlib1g-dev file wget curl python3-pyelftools
 
-      - name: Prepare GL.iNet config
+      - name: Apply GL.iNet MT6000 config
         run: |
           set -eux
 
           mkdir -p /tmp/glcfg
           unzip -q awg-src/config_mt6000_op24-4.8.3.zip -d /tmp/glcfg
 
+          echo "Config archive contents:"
+          find /tmp/glcfg -type f -maxdepth 2 -print
+
           CFG="$(find /tmp/glcfg -type f | head -n1)"
 
+          if [ -z "$CFG" ]; then
+            echo "GL.iNet config not found"
+            exit 1
+          fi
+
           cp "$CFG" owrt/.config
+
+      - name: Add AWG package
+        run: |
           cp -r awg-src/kmod-amneziawg owrt/package/
 
+      - name: Prepare OpenWrt feeds
+        run: |
           cd owrt
+
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
           echo "CONFIG_PACKAGE_kmod-amneziawg=m" >> .config
           make defconfig
 
-      - name: Build kernel
+      - name: Build toolchain and kernel
         run: |
           cd owrt
 
           make tools/install -j2
           make toolchain/install -j2
+
           make target/linux/clean
           make target/linux/compile -j2 V=s
 
-      - name: Build AmneziaWG kmod
+      - name: Force GL.iNet kernel package hash
+        run: |
+          cd owrt
+
+          find build_dir -name .vermagic -print -exec sh -c '
+            echo "9469a6c8c449c47e503c05678ea1559d" > "$1"
+          ' _ {} \;
+
+          echo "VERMAGIC FILES:"
+          find build_dir -name .vermagic -exec sh -c '
+            echo "=== $1 ==="
+            cat "$1"
+          ' _ {} \;
+
+      - name: Build AmneziaWG kernel module
         run: |
           cd owrt
 
           make package/kmod-amneziawg/clean V=s
           make package/kmod-amneziawg/compile -j2 V=s
 
+          echo "Built AWG packages:"
           find bin/ -name 'kmod-amneziawg*.ipk' -print
+
+      - name: Collect result
+        run: |
+          mkdir -p output
+
+          find owrt/bin/ \
+            -name 'kmod-amneziawg*.ipk' \
+            -exec cp {} output/ \;
+
+          ls -lh output/
 
       - name: Upload result
         uses: actions/upload-artifact@v4
         with:
           name: glinet-mt6000-awg31-kmod
-          path: owrt/bin/**/*.ipk
+          path: output/*.ipk
