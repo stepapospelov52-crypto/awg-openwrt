@@ -8,8 +8,6 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      OPENWRT_BRANCH: openwrt-24.10
-      OPENWRT_COMMIT: bb59922007043c0a0813d62b0d9f6e801caff9df
       GL_VERMAGIC: 9469a6c8c449c47e503c05678ea1559d
 
     steps:
@@ -18,13 +16,20 @@ jobs:
         with:
           path: src
 
-      - name: Checkout OpenWrt
+      - name: Checkout OpenWrt 24.10.4
         uses: actions/checkout@v4
         with:
           repository: openwrt/openwrt
-          ref: ${{ env.OPENWRT_BRANCH }}
+          ref: v24.10.4
           path: owrt
           fetch-depth: 0
+
+      - name: Checkout MediaTek patches
+        uses: actions/checkout@v4
+        with:
+          repository: gl-inet/mtk-openwrt-feeds
+          path: mtk
+          fetch-depth: 1
 
       - name: Install dependencies
         run: |
@@ -35,15 +40,28 @@ jobs:
             libssl-dev python3-setuptools rsync swig \
             unzip zlib1g-dev file wget curl python3-pyelftools
 
-      - name: Prepare OpenWrt tree
+      - name: Apply MediaTek 24.10 files and patches
         run: |
           set -eux
 
+          cp -af mtk/24.10/files/* owrt/
+
           cd owrt
-          git reset --hard "${OPENWRT_COMMIT}"
+
+          for p in $(find ../mtk/24.10/patches-base -name "*.patch" | sort); do
+            echo "Applying $p"
+            patch -p1 < "$p"
+          done
+
+      - name: Apply GL.iNet MT6000 config
+        run: |
+          set -eux
 
           mkdir -p /tmp/glcfg
-          unzip -q ../src/config_mt6000_op24-4.8.3.zip -d /tmp/glcfg
+          unzip -q src/config_mt6000_op24-4.8.3.zip -d /tmp/glcfg
+
+          echo "Config files:"
+          find /tmp/glcfg -type f -print
 
           CFG="$(find /tmp/glcfg -type f | head -n1)"
 
@@ -52,9 +70,10 @@ jobs:
             exit 1
           fi
 
-          cp "$CFG" .config
+          cp "$CFG" owrt/.config
+          cp -r src/kmod-amneziawg owrt/package/
 
-          cp -r ../src/kmod-amneziawg package/
+          cd owrt
 
           ./scripts/feeds update -a
           ./scripts/feeds install -a
@@ -63,42 +82,58 @@ jobs:
 
           make defconfig
 
-      - name: Override GL.iNet vermagic
+      - name: Build kernel 6.6.110 environment
         run: |
+          set -eux
           cd owrt
 
-          sed -i \
-            's/grep '\''=\[ym\]'\'' $(LINUX_DIR)\/\.config\.set | LC_ALL=C sort | $(MKHASH) md5 > $(LINUX_DIR)\/\.vermagic.*/echo "${{ env.GL_VERMAGIC }}" > $(LINUX_DIR)\/\.vermagic/' \
-            include/kernel-defaults.mk
-
-      - name: Build kernel environment
-        run: |
-          cd owrt
-
-          make tools/install
-          make toolchain/install
+          make tools/install -j2
+          make toolchain/install -j2
 
           make target/linux/clean
-          make target/linux/compile -j$(nproc) V=s
+          make target/linux/compile -j2 V=s
 
-          echo "Built vermagic:"
-          cat build_dir/target-*/linux-*/linux-*/.vermagic
+          echo "Checking kernel version..."
 
-          VM="$(cat build_dir/target-*/linux-*/linux-*/.vermagic)"
+          if ! find build_dir -type d -name 'linux-6.6.110' | grep -q .; then
+            echo "ERROR: kernel 6.6.110 was NOT built"
+            find build_dir -type d -name 'linux-6.6.*' -print
+            exit 1
+          fi
 
-          if [ "$VM" != "${GL_VERMAGIC}" ]; then
-            echo "Wrong vermagic: $VM"
+          echo "Kernel 6.6.110 confirmed"
+
+      - name: Set GL.iNet package vermagic
+        run: |
+          set -eux
+          cd owrt
+
+          VMFILE="$(find build_dir -name .vermagic | head -n1)"
+
+          if [ -z "$VMFILE" ]; then
+            echo ".vermagic file not found"
+            exit 1
+          fi
+
+          echo "${GL_VERMAGIC}" > "$VMFILE"
+
+          echo "Package vermagic:"
+          cat "$VMFILE"
+
+          if [ "$(cat "$VMFILE")" != "${GL_VERMAGIC}" ]; then
+            echo "Wrong vermagic"
             exit 1
           fi
 
       - name: Build AmneziaWG 3.1 kmod
         run: |
+          set -eux
           cd owrt
 
           make package/kmod-amneziawg/clean V=s
           make package/kmod-amneziawg/download V=s
           make package/kmod-amneziawg/prepare V=s
-          make package/kmod-amneziawg/compile -j$(nproc) V=s
+          make package/kmod-amneziawg/compile -j2 V=s
 
           echo "Built package:"
           find bin/ -name 'kmod-amneziawg*.ipk' -print
@@ -116,5 +151,5 @@ jobs:
       - name: Upload result
         uses: actions/upload-artifact@v4
         with:
-          name: glinet-mt6000-awg31-kmod
+          name: glinet-mt6000-awg31-kmod-6.6.110
           path: output/*.ipk
